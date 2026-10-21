@@ -119,12 +119,38 @@ def main(cfg: Config) -> int:
     status, raw = _req(asset_url, key, {"contentType": "image/png", "description": "nv2api doctor"}, timeout=30)
     results.append(_verdict("POST /v2/nvcf/assets (upload entitlement)", status, raw, ok_codes=(200, 201)))
 
+    # --- the other door: buildapi.ngc.nvidia.com ---
+    if cfg.ngc_keys:
+        from . import ngc as ngc_mod
+
+        print("\n-- NGC backend (buildapi, captcha-free) --")
+        try:
+            jwt, ttl = ngc_mod.exchange_ngc_key(cfg.ngc_keys[0])
+            print(f"[PASS] NGC key -> JWT  (valid ~{ttl // 60} min)")
+            ngc_ok = True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[FAIL] NGC key -> JWT  ({exc})")
+            results.append(False)
+            ngc_ok = False
+        if ngc_ok:
+            fid = ngc_mod.discover_function_id(model)
+            print(f"[{'PASS' if fid else 'WARN'}] nvcfFunctionId for {model}: {fid}")
+            status, raw = ngc_mod.probe_entitlement(cfg.ngc_keys[0], model)
+            ok = _verdict("POST buildapi /v3/protected/predict/stateless (text)", status, raw)
+            results.append(ok)
+    else:
+        print("\n(no NGC_API_KEY set — skipping the buildapi route, which is the only")
+        print(" one that carries preview models like cosmos3-nano-reasoner)")
+
     passed = sum(results)
     print(f"\n{passed}/{len(results)} checks passed")
     if not results[1]:
         print(
-            "\nIf the text probe 404s while /models works, this key has no route to that\n"
-            "model (preview gating). Try: N2A_DEFAULT_MODEL=nvidia/cosmos-reason2-8b"
+            "\nIf the text probe 404s while /models works, integrate.api has no route to\n"
+            "that model (preview gating). Options:\n"
+            "  * set NGC_API_KEY=<ngc.nvidia.com API key> to use the captcha-free\n"
+            "    buildapi route (backend=auto falls back automatically)\n"
+            "  * or N2A_DEFAULT_MODEL=nvidia/cosmos-reason2-8b for a GA model"
         )
     return 0 if all(results) else 1
 

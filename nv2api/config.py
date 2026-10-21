@@ -40,6 +40,13 @@ class Config:
 
     # --- upstream ---
     upstream_base: str = "https://integrate.api.nvidia.com/v1"
+    # "auto"     = try integrate.api, fall back to buildapi for unrouted models
+    # "integrate" = only the OpenAI surface
+    # "ngc"      = only buildapi (needs an NGC API key, no captcha)
+    backend: str = "auto"
+    # NGC API keys (ngc.nvidia.com -> Setup -> API Keys). Enables preview models
+    # such as cosmos3-nano-reasoner that integrate.api.nvidia.com does not route.
+    ngc_keys: list[str] = field(default_factory=list)
     # One or more nvapi- keys. Multiple keys are rotated round-robin.
     upstream_keys: list[str] = field(default_factory=list)
     upstream_timeout: int = 600          # seconds; video reasoning is slow
@@ -79,8 +86,11 @@ class Config:
         cfg.host = _env("N2A_HOST", cfg.host)
         cfg.port = _env_int("N2A_PORT", cfg.port)
         cfg.upstream_base = _env("NVIDIA_BASE_URL", cfg.upstream_base).rstrip("/")
+        cfg.backend = _env("N2A_BACKEND", cfg.backend).lower() or "auto"
         if keys := _env_list("NVIDIA_API_KEY"):
             cfg.upstream_keys = keys
+        if ngc := _env_list("NGC_API_KEY"):
+            cfg.ngc_keys = ngc
         cfg.upstream_timeout = _env_int("N2A_UPSTREAM_TIMEOUT", cfg.upstream_timeout)
         cfg.upstream_retries = _env_int("N2A_UPSTREAM_RETRIES", cfg.upstream_retries)
         if client := _env_list("N2A_API_KEYS"):

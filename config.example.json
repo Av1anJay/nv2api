@@ -3,7 +3,9 @@
   "port": 8200,
 
   "upstream_base": "https://integrate.api.nvidia.com/v1",
+  "backend": "auto",
   "upstream_keys": [],
+  "ngc_keys": [],
   "upstream_timeout": 600,
   "upstream_retries": 2,
   "upstream_retry_backoff": 1.5,

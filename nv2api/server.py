@@ -15,7 +15,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from . import __version__
+from . import __version__, ngc
 from .assets import make_resolver
 from .config import Config
 from .translate import (
@@ -56,11 +56,61 @@ class Upstream:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.keys = KeyRotator(cfg.upstream_keys)
+        self.ngc_keys = KeyRotator(cfg.ngc_keys)
+        self._tokens = ngc.TokenCache()
         parsed = urllib.parse.urlsplit(cfg.upstream_base)
         self.scheme = parsed.scheme or "https"
         self.host = parsed.netloc
         self.prefix = parsed.path.rstrip("/")
         self.ssl_ctx = ssl.create_default_context()
+
+    # ---------- NGC buildapi backend ----------
+    def _ngc_jwt(self) -> str:
+        key = self.ngc_keys.next()
+        if not key:
+            raise RuntimeError("no NGC_API_KEY configured")
+        return self._tokens.get(key)
+
+    def ngc_post_json(self, model: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """POST through buildapi.ngc.nvidia.com (captcha-free, needs NGC key)."""
+        try:
+            jwt = self._ngc_jwt()
+        except Exception as exc:  # noqa: BLE001
+            return 502, _error_body(f"NGC token exchange failed: {exc}", 502)
+        fid = ngc.discover_function_id(model)
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{ngc._buildapi()}{ngc.predict_path(model, authenticated=True)}",
+            data=body,
+            headers=ngc.build_headers(jwt, fid, stream=False),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.cfg.upstream_timeout, context=self.ssl_ctx) as resp:
+                return resp.status, json.loads(resp.read().decode() or "{}")
+        except urllib.error.HTTPError as exc:
+            return exc.code, _error_body(exc.read().decode(errors="replace"), exc.code)
+        except Exception as exc:  # noqa: BLE001
+            return 502, _error_body(str(exc), 502)
+
+    def ngc_open_stream(self, model: str, payload: dict[str, Any]):
+        jwt = self._ngc_jwt()
+        fid = ngc.discover_function_id(model)
+        headers = ngc.build_headers(jwt, fid, stream=True)
+        parsed = urllib.parse.urlsplit(ngc._buildapi())
+        if parsed.scheme == "https":
+            conn = http.client.HTTPSConnection(
+                parsed.netloc, timeout=self.cfg.upstream_timeout, context=self.ssl_ctx
+            )
+        else:
+            conn = http.client.HTTPConnection(parsed.netloc, timeout=self.cfg.upstream_timeout)
+        conn.request(
+            "POST",
+            f"{parsed.path.rstrip('/')}{ngc.predict_path(model, authenticated=True)}",
+            body=json.dumps(payload),
+            headers=headers,
+        )
+        return conn, conn.getresponse()
 
     # ---------- non-streaming ----------
     def post_json(self, path: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -204,6 +254,8 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "version": __version__,
                     "upstream": self.cfg.upstream_base,
+                    "backend": self.cfg.backend,
+                    "ngc_keys": len(self.cfg.ngc_keys),
                     "default_model": self.cfg.default_model,
                     "upstream_keys": len(self.cfg.upstream_keys),
                     "auth_required": bool(self.cfg.client_keys),
@@ -275,14 +327,31 @@ class Handler(BaseHTTPRequestHandler):
             self._chat_stream(payload, model, warnings)
             return
 
-        status, data = self.upstream.post_json("/chat/completions", payload)
+        status, data, via = self._post_chat(payload, model)
         if status != 200:
             self._json(status, data if "error" in data else {"error": data})
             return
         result = openai_completion(data, model, split_reasoning=self.cfg.split_think)
         if warnings:
             result["nv2api_warnings"] = warnings
+        if via != "integrate":
+            result["nv2api_backend"] = via
         self._json(200, result)
+
+    # ---------- backend selection ----------
+    def _post_chat(self, payload: dict[str, Any], model: str) -> tuple[int, dict[str, Any], str]:
+        """Try the OpenAI surface, then buildapi. Returns (status, body, backend)."""
+        mode = self.cfg.backend
+        if mode == "ngc":
+            status, data = self.upstream.ngc_post_json(model, payload)
+            return status, data, "ngc"
+        status, data = self.upstream.post_json("/chat/completions", payload)
+        # 404 = "page not found": integrate.api has no route for this model at
+        # all. Preview endpoints live behind buildapi instead.
+        if mode == "auto" and status == 404 and self.cfg.ngc_keys:
+            nstatus, ndata = self.upstream.ngc_post_json(model, payload)
+            return nstatus, ndata, "ngc"
+        return status, data, "integrate"
 
     def _completion(self) -> None:
         """Legacy /v1/completions -> chat, so old clients keep working."""
@@ -312,7 +381,7 @@ class Handler(BaseHTTPRequestHandler):
             max_tokens_cap=self.cfg.max_tokens_cap,
             asset_resolver=make_resolver(self.upstream.keys.next() if self.upstream.keys else None),
         )
-        status, data = self.upstream.post_json("/chat/completions", payload)
+        status, data, _via = self._post_chat(payload, model)
         if status != 200:
             self._json(status, data if "error" in data else {"error": data})
             return
@@ -331,8 +400,20 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _chat_stream(self, payload: dict[str, Any], model: str, warnings: list[str]) -> None:
+        mode = self.cfg.backend
         try:
-            conn, resp = self.upstream.open_stream("/chat/completions", payload)
+            if mode == "ngc":
+                conn, resp = self.upstream.ngc_open_stream(model, payload)
+            else:
+                conn, resp = self.upstream.open_stream("/chat/completions", payload)
+                if mode == "auto" and resp.status == 404 and self.cfg.ngc_keys:
+                    # integrate.api has no route for this preview model
+                    try:
+                        resp.read()
+                        conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    conn, resp = self.upstream.ngc_open_stream(model, payload)
         except Exception as exc:  # noqa: BLE001
             self._error(502, f"upstream connection failed: {exc}", "upstream_error")
             return

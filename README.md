@@ -67,6 +67,8 @@ Environment (all optional except the key):
 | var | default | meaning |
 | --- | --- | --- |
 | `NVIDIA_API_KEY` | – | `nvapi-` key(s), comma-separated for a pool |
+| `NGC_API_KEY` | – | NGC API key(s) — unlocks the buildapi route for preview models |
+| `N2A_BACKEND` | `auto` | `auto` (integrate → buildapi on 404), `integrate`, or `ngc` |
 | `NVIDIA_BASE_URL` | `https://integrate.api.nvidia.com/v1` | upstream |
 | `N2A_HOST` / `N2A_PORT` | `127.0.0.1` / `8200` | listen address |
 | `N2A_API_KEYS` | – | if set, clients must present one of these |
@@ -99,44 +101,60 @@ gateway burns your NVIDIA quota for anyone who finds it.
 ## Tests
 
 ```sh
-python3 tests/test_e2e.py
+python3 tests/test_e2e.py    # 33 assertions: OpenAI surface + translation
+python3 tests/test_ngc.py    # 17 assertions: NGC token exchange + buildapi route
 ```
 
-33 assertions over real sockets against `tests/mock_nim.py`, which mimics the
-NIM contract strictly (rejects system roles, unknown fields, `max_tokens > 4096`,
-non-alternating roles) — so a green run means the translation layer is right,
+Both run over real sockets against `tests/mock_nim.py` and `tests/mock_ngc.py`,
+which mimic the upstream contracts strictly (reject system roles, unknown
+fields, `max_tokens > 4096`, non-alternating roles; require a JWT-shaped bearer
+plus `nv-function-id`) — so a green run means the translation layer is right,
 not just that the code runs.
 
 ## Status / known limits
 
-### Two different NVIDIA surfaces (why "no login needed" is misleading)
+### Two different NVIDIA surfaces
 
-The playground on `build.nvidia.com` does run for signed-out visitors, but it does
-**not** call the OpenAI endpoint. It calls an internal host:
+`integrate.api.nvidia.com/v1` genuinely does **not** carry cosmos3-nano-reasoner
+(it answers `404 page not found` while GA models on the same key answer `403`).
+The build.nvidia.com playground is not a way around that — it posts to
+`buildapi.ngc.nvidia.com/v3/predict/stateless/<model>` with an invisible
+hCaptcha token (no token → `400 Captcha required`, bogus token → `400 Token is
+invalid`).
+
+That host has an authenticated, **captcha-free** sibling, and nv2api speaks it:
 
 ```
-POST https://buildapi.ngc.nvidia.com/v3/predict/stateless/nvidia/cosmos3-nano-reasoner
-  nv-function-id: 24a385c8-111a-4294-8c73-cf7575cc2595
-  nv-captcha-token: <invisible hCaptcha token, sitekey 0c6a1e45-…>
+POST https://buildapi.ngc.nvidia.com/v3/protected/predict/stateless/<model>
+  Authorization: Bearer <JWT from authn.nvidia.com>
+  nv-function-id: <uuid, scraped from the model page>
 ```
 
-Verified behaviour: no token → `400 Captcha required`; a bogus token → `400 Token is invalid`.
-That gate is a bot protection, not something a proxy should try to solve, and the
-host is not OpenAI-compatible. Meanwhile the real OpenAI surface
-(`https://integrate.api.nvidia.com/v1`) answers `404 page not found` for
-`nvidia/cosmos3-nano-reasoner` while a GA model on the same key answers `403`
-(i.e. auth-checked) — so the model is not routed for that account yet.
+`backend: "auto"` (default) calls `integrate.api` first and transparently
+retries through buildapi when the answer is `404` — so a preview model just
+works, without the client knowing which door it went through (`nv2api_backend`
+in the response says which). Set `NGC_API_KEY` (free, from
+ngc.nvidia.com → Setup → API Keys) to enable it.
 
-A free `nvapi-` key from https://build.nvidia.com/settings needs no credit card
-and is the supported path; `python3 -m nv2api --doctor` tells you which of the two
-you are hitting.
+Verified states of the buildapi route, all reproduced in `tests/test_ngc.py`:
 
-- `nvidia/cosmos3-nano-reasoner` is a **preview** endpoint: not in the public
-  `GET /v1/models` list, and `POST /v1/chat/completions` 404s without preview
-  access. Point `N2A_DEFAULT_MODEL` at `nvidia/cosmos-reason2-8b` to use the GA
-  model — the same translation path applies.
+| request | answer |
+| --- | --- |
+| no `Authorization` | `403 RBAC: access denied` |
+| non-JWT bearer | `401 Jwt is not in the form of Header.Payload.Signature` |
+| JWT, no `nv-function-id` | `400 Required header 'nv-function-id' is not present.` |
+| unsigned/captcha path | `400 Captcha required` |
+
+Remaining limits:
+
+- `nvidia/cosmos3-nano-reasoner` is still **preview**: it is absent from the
+  public `/v1/models` list, and `integrate.api` 404s it. The NGC route is the
+  supported way in; `python3 -m nv2api --doctor` tells you which of the two
+  you are hitting and why.
 - No function calling: the endpoint genuinely has none, so tools are dropped
   rather than faked.
 - NVCF asset uploads are best-effort; on failure the inline data URL is sent
   and a warning is attached.
 - Single process, no request queue: throughput is NVIDIA's rate limit, not us.
+- The captcha path is deliberately **not** implemented — solving an hCaptcha is
+  bot-protection circumvention, and the authenticated route exists.
