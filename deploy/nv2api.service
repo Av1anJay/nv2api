@@ -1,0 +1,14 @@
+[Unit]
+Description=nv2api - OpenAI-compatible gateway for NVIDIA NIM
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/nv2api
+EnvironmentFile=%h/.config/nv2api.env
+ExecStart=/usr/bin/python3 -m nv2api
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

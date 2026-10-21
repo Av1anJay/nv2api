@@ -1,0 +1,26 @@
+{
+  "host": "127.0.0.1",
+  "port": 8200,
+
+  "upstream_base": "https://integrate.api.nvidia.com/v1",
+  "upstream_keys": [],
+  "upstream_timeout": 600,
+  "upstream_retries": 2,
+  "upstream_retry_backoff": 1.5,
+
+  "client_keys": [],
+
+  "default_model": "nvidia/cosmos3-nano-reasoner",
+  "model_aliases": {
+    "cosmos3-nano-reasoner": "nvidia/cosmos3-nano-reasoner",
+    "cosmos3": "nvidia/cosmos3-nano-reasoner",
+    "cosmos-reason2": "nvidia/cosmos-reason2-8b"
+  },
+  "extra_models": ["nvidia/cosmos3-nano-reasoner"],
+  "models_ttl": 300,
+  "max_tokens_cap": 4096,
+
+  "split_think": true,
+  "drop_unsupported": true,
+  "log_requests": true
+}

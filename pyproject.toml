@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nv2api"
+version = "0.1.0"
+description = "OpenAI-compatible gateway for NVIDIA NIM endpoints (cosmos3-nano-reasoner first)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AvianJay" }]
+keywords = ["nvidia", "nim", "openai", "proxy", "cosmos", "vlm"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Internet :: Proxy Servers",
+]
+dependencies = []
+
+[project.scripts]
+nv2api = "nv2api.__main__:main"
+
+[tool.setuptools]
+packages = ["nv2api"]
