@@ -109,11 +109,32 @@ not just that the code runs.
 
 ## Status / known limits
 
-- `nvidia/cosmos3-nano-reasoner` is a **preview** endpoint: it is not in the
-  public `GET /v1/models` list yet and `POST /v1/chat/completions` answers
-  `404 page not found` for keys without preview access. Point
-  `N2A_DEFAULT_MODEL` at `nvidia/cosmos-reason2-8b` to use the GA model — the
-  same translation path applies.
+### Two different NVIDIA surfaces (why "no login needed" is misleading)
+
+The playground on `build.nvidia.com` does run for signed-out visitors, but it does
+**not** call the OpenAI endpoint. It calls an internal host:
+
+```
+POST https://buildapi.ngc.nvidia.com/v3/predict/stateless/nvidia/cosmos3-nano-reasoner
+  nv-function-id: 24a385c8-111a-4294-8c73-cf7575cc2595
+  nv-captcha-token: <invisible hCaptcha token, sitekey 0c6a1e45-…>
+```
+
+Verified behaviour: no token → `400 Captcha required`; a bogus token → `400 Token is invalid`.
+That gate is a bot protection, not something a proxy should try to solve, and the
+host is not OpenAI-compatible. Meanwhile the real OpenAI surface
+(`https://integrate.api.nvidia.com/v1`) answers `404 page not found` for
+`nvidia/cosmos3-nano-reasoner` while a GA model on the same key answers `403`
+(i.e. auth-checked) — so the model is not routed for that account yet.
+
+A free `nvapi-` key from https://build.nvidia.com/settings needs no credit card
+and is the supported path; `python3 -m nv2api --doctor` tells you which of the two
+you are hitting.
+
+- `nvidia/cosmos3-nano-reasoner` is a **preview** endpoint: not in the public
+  `GET /v1/models` list, and `POST /v1/chat/completions` 404s without preview
+  access. Point `N2A_DEFAULT_MODEL` at `nvidia/cosmos-reason2-8b` to use the GA
+  model — the same translation path applies.
 - No function calling: the endpoint genuinely has none, so tools are dropped
   rather than faked.
 - NVCF asset uploads are best-effort; on failure the inline data URL is sent
